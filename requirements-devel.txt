@@ -1,0 +1,7 @@
+
+# to template files
+jinja2
+
+# to read configs
+pyyaml
+
