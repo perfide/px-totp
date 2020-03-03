@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
+
+# Copyright:
+#   2020 P. H. <github.com/perfide>
+# License:
+#   BSD-2-Clause (BSD 2-Clause "Simplified" License)
+#   https://spdx.org/licenses/BSD-2-Clause.html
+
+"""Time-based One-Time Password Generator
+
+Reads the secret from stdin and output the next 10 tokens
+"""
+
+import base64
+import binascii
+import hashlib
+import hmac
+import re
+import struct
+import sys
+import time
+
+# Regex to match a TOTP URL
+RE_URL = re.compile(
+    r'''
+    otpauth://totp/  # TOTP URL scheme
+    [^&=?]+  # connection name (ignored)
+    \?secret=
+    ([^&=?]+)  # secret key
+    (?:&issuer=[^&=?]+)?  # issuer (optional and ignored)
+    ''',
+    re.VERBOSE,
+)
+
+
+def get_hotp(shared_secret: bytes, counter: int, digit: int = 6) -> str:
+    """Create a HMAC-Based One-Time Password as documented by RFC 4226.
+
+    Args:
+        shared_secret: Key known by client and server (shared secret) [K]
+        counter: Increased to get a new password (shared public) [C]
+        digit: System parameter [Digit]
+
+    Returns:
+        One time password
+
+    """
+    modulo = 10**digit
+    counter = struct.pack('>Q', counter)
+    digest = hmac.new(shared_secret, counter, hashlib.sha1).digest()
+    # get first 4 bits of 19th byte
+    start = ord(digest[19:20]) & 0x0F
+    end = start + 4
+    base = struct.unpack('>I', digest[start:end])[0] & 0x7FFFFFFF
+    password = base % modulo
+    return f'{password:0>6}'
+
+
+def get_totp(shared_secret, utime=None, digit=6, interval=30) -> str:
+    """Create a Time-Based One-Time Password as documented by RFC 6238.
+
+    Args:
+        shared_secret: Key known by client and server
+        utime: Unix time in seconds sice 1970
+        interval: The code renew time in seconds
+
+    Returns:
+        One time password
+
+    """
+    if utime is None:
+        utime = time.time()
+    counter = utime // interval
+    password = get_hotp(
+        shared_secret=shared_secret, counter=counter, digit=digit
+    )
+    return password
+
+
+def to_bytes(input_string: str) -> bytes:
+    """Try to convert a string to bytes using ASCII.
+
+    Args:
+        input_string: UTF-String
+
+    Retruns:
+        Encoded ASCII or None if encoding failed
+
+    """
+    try:
+        result = input_string.encode('ascii')
+    except UnicodeDecodeError:
+        result = None
+    return result
+
+
+def get_secret_from_base32(base32_input: str) -> str:
+    """Try to read a base32 string.
+
+    Args:
+        base32_input: The Base32 encoded string
+
+    Return:
+        Decoded string
+
+    """
+    try:
+        result = base64.b32decode(base32_input.upper())
+    except binascii.Error:
+        result = None
+    return result
+
+
+def get_secret_from_hex(hex_string: str) -> bytes:
+    """Convert secret from hex-string to bytes.
+
+    Args:
+        hex_string: A string of hex numbers
+
+    Retruns:
+        The hex converted to bytes or None on fail
+
+    """
+    hex_bytes = to_bytes(hex_string)
+    if hex_bytes is None:
+        return None
+    try:
+        return binascii.unhexlify(hex_bytes)
+    except binascii.Error:
+        return None
+
+
+def get_secret_from_url(url_string: str) -> bytes:
+    """Find the secret in a otpauth URL and return it as bytes.
+
+    Args:
+        url_string: Otpauth URL string
+
+    Returns:
+        Secret as bytes or None on fail
+
+    """
+    re_key = RE_URL.match(url_string)
+    if re_key is None:
+        return None
+    user_input = re_key.groups()[0]
+    base32_input = user_input.upper()
+    return get_secret_from_base32(base32_input)
+
+
+def parse_key(user_input: str, input_type: str = 'auto') -> bytes:
+    """Find secret in url or string
+
+    Args:
+        user_input: Secret in arbitary string
+        input_type: select which parsers should be used
+            options are auto, url, bse32 and hex
+
+    Returns:
+        Raw secret as bytes
+
+    """
+    real_secret = None
+    if real_secret is None and input_type in ('auto', 'url'):
+        real_secret = get_secret_from_url(user_input)
+
+    if real_secret is None and input_type in ('auto', 'base32'):
+        real_secret = get_secret_from_base32(user_input)
+
+    if real_secret is None and input_type in ('auto', 'hex'):
+        real_secret = get_secret_from_hex(user_input)
+
+    return real_secret
+
+
+def main() -> int:
+    """Read from stdin and print out 10 tokens
+
+    Args:
+        None
+
+    Returns:
+        The exit-code of the programm
+
+    """
+    secret_string = sys.stdin.read().rstrip()
+
+    secret_bytes = parse_key(secret_string)
+    if secret_bytes is None:
+        print('failed to parse {!r}'.format(secret_string))
+        return 1
+
+    utime = int(time.time())
+    for idx in range(10):
+        target_time = utime + idx * 30
+        token = get_totp(shared_secret=secret_bytes, utime=target_time)
+        print(token)
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        EXIT_CODE = main()
+    except KeyboardInterrupt:
+        EXIT_CODE = 255
+    sys.exit(EXIT_CODE)
+
+# [EOF]
